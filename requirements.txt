@@ -1,0 +1,19 @@
+pandas
+numpy
+scikit-learn
+# loguru
+matplotlib
+jupyter
+seaborn
+xgboost
+pyarrow
+ipython
+plotly
+catboost
+lightgbm
+tqdm
+colorama
+imblearn
+optuna
+python-dotenv
+pytest
