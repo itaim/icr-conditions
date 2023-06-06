@@ -53,6 +53,7 @@ class Split:
 
 @dataclass
 class ModelResult:
+    name: str
     bundle: Bundle
     model_info: Dict[str, Any]
     result_df: pd.DataFrame

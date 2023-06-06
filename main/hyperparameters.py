@@ -9,45 +9,125 @@ from optuna.trial import FrozenTrial
 from scipy.stats import randint, uniform
 from sklearn.model_selection import RandomizedSearchCV
 
-from metrics import OPTIMIZATION_OBJECTIVES
+from metrics import PRIMARY_OPTIMIZATION_OBJECTIVES
 from model import MODEL_TYPE, VERSION
 from model_trainer import GradientBoosterTrainer, ModelTrainer, Bundle
 
 
-class TrialSorter(ABC):
+class OptimizationUtility(ABC):
+    def __init__(self, objectives: List[Tuple[str, str]]):
+        self.directions, self.objectives = zip(*objectives)
+
     @abstractmethod
-    def aggregate_metrics(self, x: FrozenTrial) -> float:
+    def calculate_utility(self, trial: FrozenTrial) -> float:
         pass
 
 
-class DefaultTrialSorter(TrialSorter):
-    def __init__(self, optimization_objectives):
-        self.directions, self.objectives = zip(*optimization_objectives)
+class AggregatedObjectivesUtility(OptimizationUtility):
+    def __init__(self, objective: List[Tuple[str, str]]):
+        super().__init__(objective)
 
-    def aggregate_metrics(self, x: FrozenTrial) -> float:
-        print(f"Trial {x.number} - values: {x.values}")
+    def calculate_utility(self, trial: FrozenTrial) -> float:
+        named_scores = {
+            self.objectives[i]: trial.values[i] for i in range(len(trial.values))
+        }
+        print(f"Trial {trial.number} - scores: {named_scores}")
         return sum(
             [
                 v if self.directions[i] == "maximize" else -v
-                for i, v in enumerate(x.values)
-                if i < 2
+                for i, v in enumerate(trial.values)
             ]
         )
 
 
-class SingleMetricSorter(TrialSorter):
-    def __init__(self, optimization_objectives, metric: str):
-        self.directions, self.objectives = zip(*optimization_objectives)
-        self.value_index = self.objectives.index(metric)
+class WeightedComplexityUtility(OptimizationUtility):
+    def __init__(
+        self,
+        objective: List[Tuple[str, str]],
+        objective_utility: OptimizationUtility,
+        complexity_factor: float,
+    ):
+        super().__init__(objective)
+        self.objective_utility = objective_utility
+        self.complexity_factor = complexity_factor
 
-    def aggregate_metrics(self, x: FrozenTrial) -> float:
-        print(f"Trial {x.number} - values: {x.values}")
-        metric_val = x.values[self.value_index]
-        return (
-            metric_val
-            if self.directions[self.value_index] == "maximize"
-            else -metric_val
+    def calculate_utility(self, trial: FrozenTrial) -> float:
+        n_estimators = trial.params["n_estimators"]
+        max_depth = trial.params["max_depth"]
+        complexity_measure = self.complexity_factor * (n_estimators * max_depth)
+        objectives_goodness = self.objective_utility.calculate_utility(trial)
+        utility = objectives_goodness - complexity_measure
+        print(
+            f"Trial {trial.number} - objectives_goodness: {objectives_goodness}, complexity_measure: {complexity_measure}, utility: {utility}"
         )
+        return utility
+
+
+# class TrialSorter(ABC):
+#     @abstractmethod
+#     def aggregate_metrics(self, x: FrozenTrial) -> float:
+#         pass
+#
+#
+# class DefaultTrialSorter(TrialSorter):
+#     def __init__(self, optimization_objectives):
+#         self.directions, self.objectives = zip(*optimization_objectives)
+#
+#     def aggregate_metrics(self, x: FrozenTrial) -> float:
+#         print(f"Trial {x.number} - values: {x.values}")
+#         return sum(
+#             [
+#                 v if self.directions[i] == "maximize" else -v
+#                 for i, v in enumerate(x.values)
+#                 if i < 2
+#             ]
+#         )
+#
+#
+# class SingleMetricSorter(TrialSorter):
+#     def __init__(self, optimization_objectives, metric: str):
+#         self.directions, self.objectives = zip(*optimization_objectives)
+#         self.value_index = self.objectives.index(metric)
+#
+#     def aggregate_metrics(self, x: FrozenTrial) -> float:
+#         print(f"Trial {x.number} - values: {x.values}")
+#         metric_val = x.values[self.value_index]
+#         return (
+#             metric_val
+#             if self.directions[self.value_index] == "maximize"
+#             else -metric_val
+#         )
+#
+#
+# class UtilitySorter(TrialSorter):
+#     def __init__(self, optimization_objectives, metric: str):
+#         self.directions, self.objectives = zip(*optimization_objectives)
+#         self.value_index = self.objectives.index(metric)
+#
+#     def aggregate_metrics(self, x: FrozenTrial) -> float:
+#         # Extract the objective metric values
+#         metric_val = x.values[self.value_index]
+#         # Extract the hyperparameters
+#         n_estimators = x.params['n_estimators']
+#         max_depth = x.params['max_depth']
+#         # Define a complexity measure (this is a very simple example; you may need to adjust according to your needs)
+#         complexity_measure = n_estimators * max_depth
+#         # Define the utility function
+#         # You can adjust the weights and the function according to your needs
+#         utility = 0.1 * metric_val - 0.001 * complexity_measure
+#         print(
+#             f"Trial {x.number} - values: {x.values}, complexity_measure: {complexity_measure}, utility: {utility}, n_estimators: {n_estimators}, max_depth: {max_depth}")
+#         return utility
+#
+
+primary_objectives_utility = AggregatedObjectivesUtility(
+    PRIMARY_OPTIMIZATION_OBJECTIVES
+)
+primary_optimization_utility = WeightedComplexityUtility(
+    PRIMARY_OPTIMIZATION_OBJECTIVES,
+    primary_objectives_utility,
+    complexity_factor=0.0001,
+)
 
 
 class HyperparametersOptimizer:
@@ -113,16 +193,12 @@ class HyperparametersOptimizer:
         bundle: Bundle,
         n_splits: int,
         n_trials=500,
-        optimization_objectives: List[Tuple[str, str]] = OPTIMIZATION_OBJECTIVES,
-        sorter: TrialSorter = SingleMetricSorter(
-            OPTIMIZATION_OBJECTIVES, "weighted_log_loss"
-        ),
+        utility: OptimizationUtility = primary_optimization_utility,
     ) -> Dict[str, Any]:
         sampler = TPESampler(seed=42)
-        print(f"Objectives {optimization_objectives}")
-        directions, objectives = zip(*optimization_objectives)
+        print(f"Objectives {utility.objectives}")
         study = optuna.create_study(
-            directions=directions,
+            directions=utility.directions,
             sampler=sampler,
             pruner=optuna.pruners.MedianPruner(n_warmup_steps=10),
             study_name=f"icr-conditions-{VERSION}",
@@ -132,19 +208,21 @@ class HyperparametersOptimizer:
         )
         start = time.time()
         study.optimize(
-            lambda trial: self.objective(trial, bundle, n_splits, objectives),
+            lambda trial: self.objective(trial, bundle, n_splits, utility.objectives),
             n_trials=n_trials,
             show_progress_bar=True,
         )
-        print(f"Pareto Front")
+        print(
+            f"Pareto Front Optimal {utility.objectives}: {[f'{x.number} - values: {x.values}' for x in study.best_trials]}"
+        )
 
         best_trial = sorted(
-            study.best_trials, key=lambda x: sorter.aggregate_metrics(x)
+            study.best_trials, key=lambda x: utility.calculate_utility(x)
         )[-1]
 
         print(f"Hyperparameters search took {(time.time() - start) / 60} minutes.")
-        print(f"Best values: {pprint.pformat(best_trial.values)}")
-        print(f"Best hyper-parameters: {pprint.pformat(best_trial.params)}")
+        print(f"Best values: {best_trial.values}")
+        print(f"Best hyper-parameters: {best_trial.params}")
         return best_trial.params
 
 

@@ -17,3 +17,4 @@ imblearn
 optuna
 python-dotenv
 pytest
+black

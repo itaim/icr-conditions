@@ -108,8 +108,8 @@ SCORERS = {
     "balanced_precision_recall": (balanced_precision_recall, False),
     "average_precision_score": (average_precision_score, True),
 }
-OPTIMIZATION_OBJECTIVES = [
+PRIMARY_OPTIMIZATION_OBJECTIVES = [
     ("minimize", "weighted_log_loss"),
-    ("maximize", "matthews_corrcoef"),
+    ("maximize", "roc_auc_score"),
 ]
-SCORING = OPTIMIZATION_OBJECTIVES[0][1]
+SCORING = PRIMARY_OPTIMIZATION_OBJECTIVES[0][1]

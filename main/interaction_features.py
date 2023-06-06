@@ -52,6 +52,9 @@ def corr_feat():
 greeks = pd.read_csv(f"{base_path}/greeks.csv")
 alpha = greeks[["Id", "Alpha"]].merge(train, on=["Id"], how="inner")
 print(alpha.Alpha.value_counts())
-
+#
 gamma = greeks[["Id", "Gamma"]].merge(train, on=["Id"], how="inner")
 print(gamma.Gamma.value_counts())
+
+
+# print(np.full((20, 4), 1/4))

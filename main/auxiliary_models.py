@@ -13,7 +13,11 @@ from sklearn.metrics import (
     precision_recall_curve,
 )
 
-from hyperparameters import HyperparametersOptimizer, SingleMetricSorter
+from hyperparameters import (
+    HyperparametersOptimizer,
+    AggregatedObjectivesUtility,
+    WeightedComplexityUtility,
+)
 from metrics import weighted_log_loss
 from model import (
     Bundle,
@@ -46,42 +50,59 @@ def get_bundle(data: ICRData, greek: str):
     return Bundle(X=X, y=df[greek].map(label_map), ids=df["Id"], label_map=label_map)
 
 
-def add_feature_cols(
+AUX_EXCLUDE_COLS = {
+    "Alpha": {"Alpha_A"},
+    "Gamma": {"Gamma_M", "Gamma_N"},
+}
+
+
+def merge_features_df(
+    df: pd.DataFrame, prefix: str, features: pd.DataFrame
+) -> pd.DataFrame:
+    cols = [
+        col for col in features.columns if col not in AUX_EXCLUDE_COLS.get(prefix, {})
+    ]
+    selected_features_df = features[cols]
+    print(
+        f"merge_features_df - Merging {prefix} prediction. Cols {selected_features_df.columns}"
+    )
+    return df.merge(selected_features_df, on=["Id"], how="inner")
+
+
+def add_feature_predictions(
     df, prefix: str, predictions, label_map: Dict[int, str]
 ) -> pd.DataFrame:
     probabilities_df = pd.DataFrame(
         predictions,
         columns=[f"{prefix}_{label_map[i]}" for i in range(len(predictions[0]))],
     )
+    exclude = AUX_EXCLUDE_COLS.get(prefix, None)
+    if exclude:
+        probabilities_df.drop(columns=exclude, inplace=True)
+    # print(f'add_feature_predictions {prefix} prediction. probabilities_df {probabilities_df.columns}')
     return pd.concat([df, probabilities_df], axis=1)
 
 
-def train_meta_model(greek: str, data: ICRData, hp_trials=0) -> ModelResult:
-    result = train_model(data=data, greek=greek, n_splits=5, hp_trials=hp_trials)
-    print(result.metrics())
-    return result
-
-
-def add_meta_feature(
-    greek: str, data: ICRData, lm: OrderedDict[str, int], probabilities=None
-) -> ICRData:
+def add_feature_values(greek: str, data: ICRData, lm: OrderedDict[str, int]) -> ICRData:
     def map_to_probs(value):
         prob_array = [0.0] * len(lm)
         prob_array[lm[value]] = 1.0
         return prob_array
 
-    if not probabilities:
-        probabilities = data.greeks[greek].apply(map_to_probs)
+    probabilities = data.greeks[greek].apply(map_to_probs)
     probabilities_df = pd.DataFrame(
         probabilities.tolist(), columns=[f"{greek}_{name}" for name in lm.keys()]
     )
     new_train = pd.concat([data.train, probabilities_df], axis=1)
-    print(probabilities_df.values)
-    print(f"New train cols: {new_train.columns}")
+    print(f"add_feature_values {greek} prediction. New train cols: {new_train.columns}")
     return ICRData(train=new_train, greeks=data.greeks)
 
 
 class MultiClassClassifier(Model):
+    @property
+    def name(self) -> str:
+        return self._name
+
     @property
     def params(self) -> Dict[str, Any]:
         return self._params
@@ -101,7 +122,7 @@ class MultiClassClassifier(Model):
         params: Dict[str, Any],
         optimization_objectives: List[Tuple[str, str]],
     ):
-        self.target = target
+        self._name = target
         self.optimization_objectives = optimization_objectives
         self.bundle = bundle
         self._cat_cols = bundle.get_cat_cols()
@@ -201,9 +222,9 @@ class MultiClassClassifier(Model):
         self.metrics["matthews_corrcoef"].append(matthews_corrcoef(y_test, y_pred))
 
     def complete(self) -> ModelResult:
-        result_df = pd.DataFrame(data={"Id": self.ids_list, "target": self.targets})
-        result_df = add_feature_cols(
-            result_df, self.target, self.predictions, self.bundle.reverse_labels_map()
+        result_df = pd.DataFrame(data={"Id": self.ids_list, self.name: self.targets})
+        result_df = add_feature_predictions(
+            result_df, self.name, self.predictions, self.bundle.reverse_labels_map()
         )
         metrics = {k: np.mean(v) for k, v in self.metrics.items()}
 
@@ -219,6 +240,7 @@ class MultiClassClassifier(Model):
 
         info_record["additional"] = additional
         return ModelResult(
+            name=self.name,
             bundle=self.bundle,
             model_info=info_record,
             result_df=result_df,
@@ -227,11 +249,11 @@ class MultiClassClassifier(Model):
         )
 
 
-def train_model(
-    data: ICRData, greek: str, n_splits: int = 5, hp_trials: int = 100
+def train_meta_model(
+    greek: str, data: ICRData, hp_trials: int | Dict[str, Any] = 100, n_splits: int = 5
 ) -> ModelResult:
     bundle = get_bundle(data=data, greek=greek)
-
+    print(f"Training meta model {greek}")
     trainer = GradientBoosterTrainer()
 
     # num_cols=num_cols, cat_cols=cat_cols, clf=xgb_multiclass,
@@ -239,10 +261,6 @@ def train_model(
     # optimization_objectives = [('maximize', 'accuracy_score')]
 
     # optimization_objectives = [('maximize', 'accuracy_score'),('maximize', 'accuracy_score'), ('minimize', 'weighted_log_loss')]
-    optimization_objectives = [
-        ("maximize", "matthews_corrcoef"),
-        ("minimize", "weighted_log_loss"),
-    ]
 
     def create_model(params) -> MultiClassClassifier:
         return MultiClassClassifier(
@@ -254,65 +272,28 @@ def train_model(
 
     optimizer = HyperparametersOptimizer(trainer=trainer, model_provider=create_model)
 
-    if hp_trials > 0:
+    if isinstance(hp_trials, int):
+        optimization_objectives = [
+            ("maximize", "matthews_corrcoef"),
+            ("minimize", "weighted_log_loss"),
+        ]
+        aux_objectives_utility = AggregatedObjectivesUtility(optimization_objectives)
+        aux_optimization_utility = WeightedComplexityUtility(
+            optimization_objectives, aux_objectives_utility, complexity_factor=0.0001
+        )
+
         start = time.time()
         best_params = optimizer.optimize_params(
             bundle=bundle,
             n_splits=4,
             n_trials=hp_trials,
-            optimization_objectives=optimization_objectives,
-            sorter=SingleMetricSorter(optimization_objectives, "matthews_corrcoef"),
+            utility=aux_optimization_utility,
         )
         print(
             f"It took {(time.time() - start) / 60} minutes to optimize params, {hp_trials} trials"
         )
-    elif greek == "Delta":
-        best_params = {
-            "n_estimators": 122,
-            "max_depth": 15,
-            "learning_rate": 0.07346740023932911,
-            "subsample": 0.559195090518222,
-            "colsample_bytree": 0.29361118426546196,
-            "min_child_weight": 5,
-            "gamma": 0.05808361216819946,
-            "reg_alpha": 0.008661774840134775,
-            "reg_lambda": 0.006011190005930914,
-        }
-    elif greek == "Beta":
-        best_params = {
-            "n_estimators": 164,
-            "max_depth": 5,
-            "learning_rate": 0.09702107536403744,
-            "subsample": 0.6994655844802531,
-            "colsample_bytree": 0.3274034664069657,
-            "min_child_weight": 6,
-            "gamma": 0.18340450985343382,
-            "reg_alpha": 0.0030424920053710816,
-            "reg_lambda": 0.005247611840679216,
-        }
-    elif greek == "Gamm":
-        best_params = {
-            "colsample_bytree": 0.4487470419390332,
-            "gamma": 0.37641698570568116,
-            "learning_rate": 0.09983459509160654,
-            "max_depth": 6,
-            "min_child_weight": 13,
-            "n_estimators": 191,
-            "reg_alpha": 0.00643785445276256,
-            "reg_lambda": 0.0012425584014879776,
-            "subsample": 0.7936767533192691,
-        }
     else:
-        best_params = {
-            "colsample_bytree": 0.3432562109579994,
-            "gamma": 0.12967210227795833,
-            "learning_rate": 0.07735950868090753,
-            "max_depth": 15,
-            "min_child_weight": 7,
-            "n_estimators": 99,
-            "reg_alpha": 0.009769966554553772,
-            "reg_lambda": 0.002178694812619288,
-            "subsample": 0.49143481418652624,
-        }
+        best_params = hp_trials
+
     model = create_model(best_params)
     return trainer.train_model(model=model, bundle=bundle, n_splits=n_splits)

@@ -1,4 +1,3 @@
-import pprint
 from abc import abstractmethod, ABC
 from collections import defaultdict
 from typing import Any, Dict
@@ -16,13 +15,18 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 
-from metrics import SCORERS, OPTIMIZATION_OBJECTIVES, get_scale_pos
+from metrics import SCORERS, PRIMARY_OPTIMIZATION_OBJECTIVES, get_scale_pos
 
 # from main.main import num_cols, cat_cols
 from model import Bundle, ModelResult, MODEL_TYPE, Split, VERSION
 
 
 class Model(ABC):
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        pass
+
     @property
     @abstractmethod
     def params(self) -> Dict[str, Any]:
@@ -117,6 +121,10 @@ class Model(ABC):
 
 
 class BinaryClassifier(Model):
+    @property
+    def name(self) -> str:
+        return "Primary"
+
     def __init__(self, bundle: Bundle, params: Dict[str, Any], scale_pos_weight: float):
         self.bundle = bundle
         self._cat_cols = bundle.get_cat_cols()
@@ -210,7 +218,9 @@ class BinaryClassifier(Model):
         }
         additional = {
             "model_type": MODEL_TYPE,
-            "optimization_objectives": [obj for _, obj in OPTIMIZATION_OBJECTIVES],
+            "optimization_objectives": [
+                obj for _, obj in PRIMARY_OPTIMIZATION_OBJECTIVES
+            ],
             "hyper_prams": self.params.copy() if self.params else {},
             "model_version": VERSION,
         }
@@ -223,6 +233,7 @@ class BinaryClassifier(Model):
         info_record["additional"] = additional
 
         return ModelResult(
+            name=self.name,
             bundle=self.bundle,
             model_info=info_record,
             result_df=result_df,
